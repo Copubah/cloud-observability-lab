@@ -8,6 +8,7 @@ from opentelemetry import trace
 
 from app.database import connect
 from app.models import Order, OrderCreate, User
+from app.telemetry import orders_created
 
 tracer = trace.get_tracer(__name__)
 
@@ -70,6 +71,7 @@ def save_order(order: OrderCreate, total: Decimal, path: Path) -> Order:
             created_at=created_at,
         )
     # Only report success after the transaction has committed.
+    orders_created.add(1)
     return result
 
 

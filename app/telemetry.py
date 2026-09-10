@@ -1,12 +1,19 @@
-"""Vendor-neutral traces and metrics with console or OTLP/HTTP export."""
+"""Vendor-neutral traces, metrics, and correlated logs."""
 
 import logging
 import os
+import sys
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
 from opentelemetry import metrics, trace
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.instrumentation.logging import LoggingInstrumentor
+from opentelemetry.instrumentation.logging.handler import LoggingHandler
+from opentelemetry.sdk._logs import LoggerProvider
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.metrics import NoOpMeterProvider
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -18,6 +25,8 @@ from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExpo
 from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, View
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
+
+from app.logging_config import CorrelationFilter, JSONFormatter, capture_trace_ids
 
 logger = logging.getLogger(__name__)
 orders_created = metrics.get_meter("cloud-observability-lab").create_counter(
@@ -52,7 +61,7 @@ def service_resource() -> Resource:
     return Resource.create(
         {
             "service.name": os.getenv("OTEL_SERVICE_NAME", "cloud-observability-lab"),
-            "service.version": "0.4.0",
+            "service.version": "0.5.0",
         }
     )
 
@@ -111,6 +120,61 @@ def configure_metrics() -> MeterProvider:
     return provider
 
 
+@lru_cache(maxsize=1)
+def configure_logging() -> LoggerProvider:
+    mode = os.getenv("OTEL_LOGS_EXPORTER", "console").strip().lower()
+    if mode not in {"console", "otlp", "none"}:
+        raise ValueError("OTEL_LOGS_EXPORTER must be console, otlp, or none")
+    level_name = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    if level_name not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+        raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
+    level = getattr(logging, level_name)
+    exporter = None
+    if mode == "otlp":
+        validate_otlp_configuration("LOGS")
+        exporter = OTLPLogExporter()
+    provider = LoggerProvider(resource=service_resource())
+    if exporter is not None:
+        provider.add_log_record_processor(BatchLogRecordProcessor(exporter))
+    set_logger_provider(provider)
+    # In the pinned instrumentation, the hook captures IDs without installing
+    # its text formatter or a second, automatic root OTLP handler.
+    LoggingInstrumentor().instrument(
+        set_logging_format=False,
+        enable_log_auto_instrumentation=False,
+        log_hook=capture_trace_ids,
+    )
+    correlation = CorrelationFilter(str(service_resource().attributes["service.name"]))
+    root = logging.getLogger()
+    root.setLevel(level)
+    console = logging.StreamHandler(sys.stdout) if mode != "none" else logging.NullHandler()
+    console.setLevel(level)
+    console.addFilter(correlation)
+    console.setFormatter(JSONFormatter())
+    root.handlers[:] = [console]
+
+    application_logger = logging.getLogger("app")
+    application_logger.handlers.clear()
+    application_logger.setLevel(level)
+    application_logger.propagate = True
+    if exporter is not None:
+        handler = LoggingHandler(level=level, logger_provider=provider)
+        handler.addFilter(correlation)
+        # Only application logs go to OTLP. Exporter diagnostics stay on stdout,
+        # avoiding recursive export when the Collector is unavailable.
+        application_logger.addHandler(handler)
+
+    for name in ("uvicorn", "uvicorn.error"):
+        server_logger = logging.getLogger(name)
+        server_logger.handlers.clear()
+        server_logger.propagate = True
+    # Our middleware emits a correlated request summary instead of an access line.
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers[:] = [logging.NullHandler()]
+    access_logger.propagate = False
+    return provider
+
+
 def instrument_app(application: FastAPI, provider: TracerProvider) -> None:
     FastAPIInstrumentor.instrument_app(
         application,
@@ -134,3 +198,11 @@ def flush_metrics(provider: MeterProvider) -> None:
     except Exception:
         # Export failure must not replace an application startup/shutdown error.
         logger.exception("Metric flush failed")
+
+
+def flush_logs(provider: LoggerProvider) -> None:
+    try:
+        if not provider.force_flush(timeout_millis=5000):
+            logger.warning("Log flush did not finish within five seconds")
+    except Exception:
+        logger.exception("Log flush failed")

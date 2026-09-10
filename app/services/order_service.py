@@ -1,5 +1,6 @@
 """Order processing with a separate span for each business step."""
 
+import logging
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -11,6 +12,7 @@ from app.models import Order, OrderCreate, User
 from app.telemetry import orders_created
 
 tracer = trace.get_tracer(__name__)
+logger = logging.getLogger(__name__)
 
 
 class InvalidOrder(ValueError):
@@ -25,7 +27,9 @@ class CustomerNotFound(LookupError):
 def validate_order(order: OrderCreate) -> None:
     # Schema validation handles shape and types; this is a business limit.
     if order.quantity > 1000:
+        logger.warning("Order rejected: quantity exceeds 1000")
         raise InvalidOrder("Quantity must not exceed 1000")
+    logger.info("Order validated")
 
 
 @tracer.start_as_current_span("lookup_customer")
@@ -35,13 +39,17 @@ def lookup_customer(customer_id: int, path: Path) -> User:
             "SELECT id, name, email FROM users WHERE id = ?", (customer_id,)
         ).fetchone()
     if row is None:
+        logger.warning("Order rejected: customer not found")
         raise CustomerNotFound("Customer not found")
+    logger.info("Customer found")
     return User(**dict(row))
 
 
 @tracer.start_as_current_span("calculate_total")
 def calculate_total(order: OrderCreate) -> Decimal:
-    return (order.price * order.quantity).quantize(Decimal("0.01"))
+    total = (order.price * order.quantity).quantize(Decimal("0.01"))
+    logger.info("Order total calculated")
+    return total
 
 
 @tracer.start_as_current_span("save_order")
@@ -72,6 +80,7 @@ def save_order(order: OrderCreate, total: Decimal, path: Path) -> Order:
         )
     # Only report success after the transaction has committed.
     orders_created.add(1)
+    logger.info("Order saved", extra={"order_id": result.id})
     return result
 
 

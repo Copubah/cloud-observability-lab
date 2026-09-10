@@ -1,11 +1,15 @@
-"""Bounded HTTP metric dimensions and one measurement per request."""
+"""HTTP metrics and request logs that preserve trace and route context."""
 
+import logging
 from time import perf_counter
 
 from opentelemetry import metrics
 from opentelemetry.metrics import MeterProvider
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from app.logging_config import request_scope
+
+logger = logging.getLogger(__name__)
 METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT"}
 
 
@@ -69,3 +73,38 @@ class HTTPMetricsMiddleware:
             # Exceptions before a response still count; preserve the original exception.
             # This guard also prevents double counting after a completed response.
             record(completed=False)
+
+
+class RequestLoggingMiddleware:
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        token = request_scope.set(scope)
+        started = perf_counter()
+        status = 500
+
+        def details() -> dict[str, int | float]:
+            return {"status_code": status, "duration_ms": round((perf_counter() - started) * 1000, 3)}
+
+        async def logged_send(message: Message) -> None:
+            nonlocal status
+            if message["type"] == "http.response.start":
+                status = message["status"]
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body", False):
+                level = logging.ERROR if status >= 500 else logging.WARNING if status >= 400 else logging.INFO
+                logger.log(level, "Request completed", extra=details())
+
+        try:
+            await self.app(scope, receive, logged_send)
+        except Exception:
+            # Log while the request span and route context are still available.
+            logger.exception("Request failed", extra=details())
+            raise
+        finally:
+            # Prevent context from leaking into the next request or lifecycle logs.
+            request_scope.reset(token)

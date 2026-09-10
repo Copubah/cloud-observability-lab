@@ -5,10 +5,10 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 5: FastAPI with SQLite, OpenTelemetry traces and metrics, and structured
-correlated logs. The `/error` route now demonstrates exception correlation.
-Traffic generation, environment-driven incidents, and infrastructure arrive
-in later phases.
+Phase 6: FastAPI emits traces, metrics, and correlated logs to an
+OpenTelemetry Collector with a debug exporter. The `/error` route demonstrates
+exception correlation. Aspire Dashboard comes next; traffic generation,
+environment-driven incidents, and application Dockerization follow later.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -531,3 +531,171 @@ The providers remain process-wide and shut down via SDK process-exit hooks.
 
 References: [logging instrumentation](https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/logging/logging.html)
 and [OpenTelemetry log SDK](https://opentelemetry-python.readthedocs.io/en/stable/sdk/_logs.html).
+
+## Phase 6: OpenTelemetry Collector
+
+The application now has a real OTLP destination. The Collector receives each
+signal, limits memory use, batches data, and prints it for inspection:
+
+```text
+FastAPI SDKs → OTLP/HTTP → Collector
+                          ├── traces  → memory_limiter → batch → debug
+                          ├── metrics → memory_limiter → batch → debug
+                          └── logs    → memory_limiter → batch → debug
+```
+
+The complete configuration is in `otel/collector-config.yaml`. Defining a
+receiver or exporter does not enable a signal by itself: each signal needs
+its own `service.pipelines` entry. In Phase 7, the Collector will forward
+these same signals to Aspire Dashboard. The application exporters remain
+vendor-neutral and need no code changes.
+
+The runtime is pinned to `otel/opentelemetry-collector-contrib:0.152.1`.
+The contrib distribution includes the health-check extension. Docker runs
+only the Collector in this phase; the API still runs in its Python virtual
+environment. The full Docker Compose stack belongs to Phase 9.
+
+### Validate and start the Collector
+
+Prerequisites: Docker Engine running, permission to access its daemon, and
+network access for the first image pull. From the repository root:
+
+```bash
+docker pull otel/opentelemetry-collector-contrib:0.152.1
+
+docker run --rm \
+  --mount "type=bind,source=$PWD/otel/collector-config.yaml,target=/etc/otelcol-contrib/config.yaml,readonly" \
+  otel/opentelemetry-collector-contrib:0.152.1 \
+  validate --config=/etc/otelcol-contrib/config.yaml
+```
+
+Successful validation exits with code 0. Then, in terminal 1:
+
+```bash
+docker run --rm --name cloud-observability-collector \
+  --memory=256m --cpus=1 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -e GOMEMLIMIT=128MiB \
+  -p 127.0.0.1:4318:4318 \
+  --mount "type=bind,source=$PWD/otel/collector-config.yaml,target=/etc/otelcol-contrib/config.yaml,readonly" \
+  otel/opentelemetry-collector-contrib:0.152.1 \
+  --config=/etc/otelcol-contrib/config.yaml
+```
+
+Expect receiver startup messages and `Everything is ready. Begin running and
+processing data.` The configuration binds receivers to `0.0.0.0` inside the
+container so Docker port forwarding can reach them. Host exposure is limited
+by the `127.0.0.1` port mapping.
+
+| Purpose | Host port in Phase 6 | Container port |
+|---|---|---|
+| FastAPI, running on host | 8000 | Not containerized yet |
+| OTLP HTTP | 127.0.0.1:4318 | 4318 |
+| OTLP gRPC | Not published | 4317 |
+| Collector health extension | Not published | 13133 |
+| Collector self-metrics | Not published | Default internal 8888 |
+| Aspire Dashboard | Not running yet | Phase 7 |
+
+Do not publish internal ports just to make them visible. A health-check
+response indicates the Collector is running; it does not prove receipt of
+all three signals. Verify actual telemetry as below.
+
+The memory limiter's soft threshold is 144 MiB (192 minus 48); its hard
+threshold is 192 MiB, below the 256 MiB container limit. It checks once per
+second and can refuse incoming data under pressure. `GOMEMLIMIT=128MiB`
+guides Go's garbage collector; neither setting guarantees that a sudden
+memory spike cannot reach the container limit. Batching follows the limiter,
+with a 256-item trigger, 512-item maximum, and one-second timeout. These
+are item counts, not byte limits.
+
+### Send the application's three signals
+
+In terminal 2, from the repository root, stop any older API process before
+starting this one:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_EXPORTER_OTLP_TIMEOUT=5
+export OTEL_METRIC_EXPORT_INTERVAL=1000
+export OTEL_BSP_SCHEDULE_DELAY=1000
+export OTEL_BLRP_SCHEDULE_DELAY=1000
+export OTEL_SERVICE_NAME=cloud-observability-lab
+export LOG_LEVEL=INFO
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+The app does not load `.env` automatically. Previously exported
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`,
+or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` override the generic endpoint. Unset
+any stale signal-specific overrides before running this example. The same
+precedence applies to signal-specific protocol settings.
+
+In terminal 3:
+
+```bash
+curl --fail-with-body -i http://127.0.0.1:8000/orders \
+  -H 'Content-Type: application/json' \
+  -H 'traceparent: 00-11111111111111111111111111111111-2222222222222222-01' \
+  -d '{"customer_id":1,"product":"Cloud Lab Notebook","quantity":2,"price":"19.99"}'
+
+curl -i http://127.0.0.1:8000/error \
+  -H 'traceparent: 00-33333333333333333333333333333333-4444444444444444-01'
+
+docker logs --since 1m cloud-observability-collector
+```
+
+Expect HTTP 201 and 500. Allow a few seconds for both SDK and Collector
+batching. In the **Collector's** output, verify all of the following:
+
+- Traces contain `POST /orders`, the four business spans, and `GET /error`.
+- The error trace has ID `33333333333333333333333333333333`, ERROR status,
+  and an exception event.
+- A `Request failed` log carries that same trace ID and server span ID.
+- Metrics include `lab.http.requests`, `lab.http.server_errors`, and
+  `lab.orders.created`, with resource `service.name=cloud-observability-lab`.
+
+For a fresh API process with only those two requests, request count sums
+to 2, server-error count to 1, and orders-created count to 1. Metrics are
+cumulative snapshots, so do not add counts across repeated exports. The
+application also writes JSON logs on stdout in OTLP mode; seeing those
+alone is not evidence that the Collector received anything.
+
+### Troubleshooting and cleanup
+
+- If Docker cannot connect to its daemon, start Docker or use an account
+  with daemon access. This is separate from Collector configuration errors.
+- If port 4318 is occupied, use `-p 127.0.0.1:14318:4318` and point the
+  app at `http://localhost:14318`. Keep the container receiver at 4318.
+- If the container name already exists, inspect it with `docker ps -a`
+  before stopping it or choosing another name.
+- Connection refusal usually means the Collector is absent, not ready, or
+  the endpoint is wrong. HTTP 404 often means a wrong signal-specific path.
+- HTTP/protobuf goes to 4318, not gRPC port 4317. The generic endpoint must
+  not include `/v1/traces`; the SDK appends the correct path for each signal.
+- A host-run API uses `localhost`; the later Compose API will use the
+  Collector service name because container-local `localhost` is different.
+
+The debug exporter is for inspection, not durable storage. Detailed output
+contains telemetry payloads and can be noisy; its log sampling is disabled
+for this small verification exercise. No dashboard or persistent telemetry
+backend exists yet, and buffering is in memory.
+
+Stop the API with Ctrl+C first so its SDKs flush while the Collector is
+still running. Then stop the Collector with Ctrl+C in terminal 1 or:
+
+```bash
+docker stop cloud-observability-collector
+```
+
+`--rm` removes the stopped container. Its image remains cached and the
+application's SQLite file remains intact. To return to console-only mode,
+set the three exporter variables to `console` and restart the API.
+
+References: [Collector configuration](https://opentelemetry.io/docs/collector/configuration/)
+and [memory limiter](https://github.com/open-telemetry/opentelemetry-collector/tree/main/processor/memorylimiterprocessor).

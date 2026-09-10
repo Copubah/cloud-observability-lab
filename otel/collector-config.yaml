@@ -1,0 +1,46 @@
+# Phase 6: inspect all three signals before connecting a dashboard in Phase 7.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Refuse new data under memory pressure before downstream processors allocate more.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+    send_batch_max_size: 512
+
+exporters:
+  debug:
+    verbosity: detailed
+    # Show every batch in this small lab so verification is not affected by log sampling.
+    sampling_initial: 100
+    sampling_thereafter: 1
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

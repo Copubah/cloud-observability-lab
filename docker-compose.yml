@@ -1,0 +1,58 @@
+services:
+  app:
+    build: .
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    environment:
+      DATABASE_PATH: /app/data/lab.db
+      OTEL_SERVICE_NAME: cloud-observability-lab
+      OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=local
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: otlp
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://collector:4318
+      OTEL_METRIC_EXPORT_INTERVAL: "1000"
+      OTEL_BSP_SCHEDULE_DELAY: "1000"
+      OTEL_BLRP_SCHEDULE_DELAY: "1000"
+      SIMULATE_DB_LATENCY: ${SIMULATE_DB_LATENCY:-false}
+      SIMULATE_ERRORS: ${SIMULATE_ERRORS:-false}
+    volumes:
+      - app-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 30s
+    depends_on:
+      collector:
+        condition: service_started
+
+  collector:
+    image: otel/opentelemetry-collector-contrib:0.152.1
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+      - --config=/etc/otelcol-contrib/aspire.yaml
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ./otel/collector-aspire.yaml:/etc/otelcol-contrib/aspire.yaml:ro
+    environment:
+      GOMEMLIMIT: 128MiB
+    mem_limit: 256m
+    cpus: 1
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      aspire-dashboard:
+        condition: service_started
+
+  aspire-dashboard:
+    image: mcr.microsoft.com/dotnet/aspire-dashboard:13@sha256:c5cfff500bab4f81072226445f659f02e9792c61bd5ae2c4a9423b40fa9eabb1
+    env_file: otel/aspire.env
+    ports:
+      - "127.0.0.1:${ASPIRE_PORT:-18888}:18888"
+
+volumes:
+  app-data:

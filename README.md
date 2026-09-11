@@ -5,10 +5,9 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 8: the API exports all three telemetry signals through the Collector
-into Aspire Dashboard. A repeatable traffic generator exercises normal,
-slow, and failing requests; environment variables reproduce order incidents.
-Application Dockerization follows in Phase 9.
+Phase 9: `docker compose up --build` runs the Python 3.12 API, Collector,
+and Aspire Dashboard together. The API runs as a non-root user with a
+health check and persistent SQLite storage. Automated tests follow in Phase 10.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -1016,3 +1015,121 @@ An existing API process does not inherit later shell exports. `.env.example`
 is documentation, not automatically loaded configuration. A wrong URL or
 occupied port produces connection/startup failures; match `--url` to the
 API's listening port. Use Phase 7's cleanup commands when finished.
+
+## Phase 9 — Docker Compose stack
+
+This phase packages the existing API without changing its instrumentation.
+Docker DNS replaces the host Collector endpoint. Complete runnable definitions
+are in `Dockerfile`, `docker-compose.yml`, and `.dockerignore`.
+
+```mermaid
+flowchart LR
+    Client -->|localhost:8000| API[FastAPI: Python 3.12]
+    API -->|collector:4318 OTLP HTTP| Collector
+    Collector -->|aspire-dashboard:18890 OTLP HTTP| Aspire
+    Browser -->|localhost:18888| Aspire
+    API --> SQLite[(app-data volume)]
+```
+
+The slim image installs only runtime requirements. UID/GID 10001 owns
+`/app/data`; a fresh named volume inherits that directory's ownership.
+The application filesystem is read-only except for its database volume and
+`/tmp`. The build context allowlist excludes local databases, `.env`, Git
+history, virtual environments, and documentation. The Python base tag follows
+3.12 patch updates; rebuilding later may use a newer base image.
+
+The Python-based health check needs no curl package and checks process
+liveness through `/health`. It intentionally does not make API health depend
+on telemetry delivery. Compose orders startup and shutdown using dependencies,
+but `service_started` does not guarantee Collector/Dashboard readiness.
+Exporter retries handle transient startup failures; telemetry delivery remains
+best effort. See [Docker's startup-order documentation](https://docs.docker.com/compose/how-tos/startup-order/).
+
+### Start and exercise the stack
+
+Prerequisites: Docker Engine and the Docker Compose v2 plugin. Stop any host
+API or Phase 7 containers using ports 8000/18888 first. From the repo root:
+
+```bash
+docker compose config --quiet
+docker compose up --build
+```
+
+Or start in the background and wait for the API health check:
+
+```bash
+docker compose up --build -d --wait
+docker compose ps
+curl --fail-with-body http://127.0.0.1:8000/health
+python3 scripts/generate_traffic.py --requests 10 --delay 0.5
+```
+
+Expect the app to show `healthy`, the two telemetry services to be running,
+and health to return `{"status":"healthy"}`. Traffic should summarize as
+`{"200": 6, "201": 2, "500": 2}` with simulation disabled. Open
+<http://localhost:18888> and use Phase 7's logs, trace, and metric walkthrough.
+Docker health probes also generate `/health` telemetry every ten seconds;
+filter by route when comparing incident metrics. A healthy app alone does not
+prove telemetry arrived; confirm the records in
+Aspire and inspect Collector logs for export failures.
+
+| Service/port | Host publication | Container endpoint |
+|---|---|---|
+| API HTTP | 127.0.0.1:8000 | app:8000 |
+| Aspire UI | 127.0.0.1:18888 | aspire-dashboard:18888 |
+| Collector OTLP HTTP | None | collector:4318 |
+| Collector OTLP gRPC | None | collector:4317 |
+| Aspire OTLP HTTP/gRPC | None | aspire-dashboard:18890 / :18889 |
+| Collector health/self-metrics | None | collector:13133 / :8888 |
+
+Only API and Dashboard UI ports are published. The host-run API from earlier
+phases cannot send to this stack's Collector through localhost:4318; run the
+Compose app or use the earlier host-oriented setup. To change host ports:
+
+```bash
+APP_PORT=8001 ASPIRE_PORT=18887 docker compose up --build -d --wait
+python3 scripts/generate_traffic.py --requests 10 --delay 0.5 --url http://127.0.0.1:8001
+```
+
+Browse port 18887 in that case. Internal endpoints stay unchanged. Compose
+reads `.env` for interpolation, but only the variables explicitly mapped in
+`environment` enter the app. The host `.env.example` OTLP endpoint therefore
+does not override the container endpoint.
+
+### Simulate and restore
+
+Recreate the app to apply environment changes; `docker compose restart`
+does not update its environment:
+
+```bash
+SIMULATE_DB_LATENCY=true SIMULATE_ERRORS=false docker compose up -d app
+python3 scripts/generate_traffic.py --requests 10 --delay 0.5
+SIMULATE_DB_LATENCY=false SIMULATE_ERRORS=true docker compose up -d app
+python3 scripts/generate_traffic.py --requests 10 --delay 0.5
+SIMULATE_DB_LATENCY=false SIMULATE_ERRORS=false docker compose up -d app
+```
+
+If you changed host ports, retain the same port variables for these commands.
+Use Phase 8's expected outcomes and diagnosis steps.
+
+### Inspect and clean up
+
+```bash
+docker compose logs --tail=100 app collector aspire-dashboard
+docker compose exec app id
+docker compose exec app python --version
+docker compose down
+```
+
+Expect UID 10001 and Python 3.12. `down` removes this project's containers and
+network while preserving the `app-data` volume. A later `up` retains orders.
+Aspire telemetry is in memory and does not survive container recreation.
+To also delete this lab's stored orders, intentionally remove its volume:
+
+```bash
+docker compose down --volumes
+```
+
+Do not bind-mount a root-owned host directory over `/app/data`; that bypasses
+the fresh named-volume ownership setup and may prevent SQLite writes. This
+single-instance SQLite lab is not intended to scale to multiple API replicas.

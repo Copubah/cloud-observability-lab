@@ -1,0 +1,8 @@
+# Allow only build inputs; exclude local databases, credentials and tooling.
+**
+!Dockerfile
+!requirements.txt
+!app/
+!app/**
+**/__pycache__
+**/*.pyc

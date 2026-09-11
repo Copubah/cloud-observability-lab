@@ -5,9 +5,9 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 9: `docker compose up --build` runs the Python 3.12 API, Collector,
-and Aspire Dashboard together. The API runs as a non-root user with a
-health check and persistent SQLite storage. Automated tests follow in Phase 10.
+Phase 10: pytest covers the API, SQLite persistence, incident modes, and
+trace/log correlation without AWS or a running Collector. The local Compose
+stack remains available for end-to-end visualization. AWS architecture is next.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -1133,3 +1133,53 @@ docker compose down --volumes
 Do not bind-mount a root-owned host directory over `/app/data`; that bypasses
 the fresh named-volume ownership setup and may prevent SQLite writes. This
 single-instance SQLite lab is not intended to scale to multiple API replicas.
+
+## Phase 10 — automated tests
+
+Tests make the API contracts and troubleshooting demonstrations repeatable.
+Complete test code is in `tests/conftest.py`, `tests/test_api.py`, and
+`tests/test_observability.py`; `pytest.ini` limits discovery to that directory.
+`requirements-dev.txt` adds pytest and HTTPX without enlarging the runtime image.
+
+The client fixture runs FastAPI's real lifespan and creates a temporary SQLite
+file per test. It resets simulation flags regardless of your shell settings.
+Exporter modes are set before importing the application because OpenTelemetry
+providers are process-wide. Tests send no telemetry to external backends.
+An in-memory span exporter checks the real instrumentation without OTLP.
+
+`raise_server_exceptions=False` lets tests inspect HTTP 500 responses instead
+of having TestClient re-raise the deliberate exception. Real waits verify the
+latency demonstrations; tests use a lower timing bound and no upper bound to
+avoid failures caused solely by a busy machine. Logging capture checks the
+error record's trace and span IDs against its finished server span.
+
+From the repository root:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+No API process, Docker, Collector, Dashboard, or AWS credentials are required.
+Use a fresh pytest process after changing exporter configuration. The suite
+covers health, seeded/missing/invalid users, valid/invalid orders, exact cents
+in SQLite, unknown customers, `/slow`, `/error`, all four simulation modes,
+business span parentage, and error trace/log correlation.
+
+For one concrete regression check:
+
+```bash
+python -m pytest -q tests/test_observability.py
+```
+
+Expect both observability tests to pass. This verifies in-process spans and
+log correlation, not OTLP transport or Dashboard rendering; Phase 9's Compose
+checks cover those separately. Temporary test databases do not touch `data/lab.db`
+or the Compose volume. This phase does not claim a line-coverage percentage.
+
+Reference: [FastAPI testing with pytest and HTTPX](https://fastapi.tiangolo.com/tutorial/testing/).
+
+Verified result: **25 passed** on Python 3.12.14 (container) and 3.13.14
+(local virtual environment). Both runs report one dependency deprecation
+warning from Starlette's AnyIO `BlockingPortal` alias; it is not suppressed.

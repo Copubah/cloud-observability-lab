@@ -1,0 +1,25 @@
+# Merge after collector-config.yaml: keep debug output and forward all signals.
+exporters:
+  otlp_http/aspire:
+    # Dashboard OTLP HTTP is private to the Docker network, not the UI port.
+    endpoint: http://aspire-dashboard:18890
+    # This pinned Dashboard's HTTP receiver does not decode gzip request bodies.
+    compression: none
+    timeout: 5s
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 5s
+      max_elapsed_time: 30s
+    sending_queue:
+      enabled: true
+      queue_size: 256
+
+service:
+  pipelines:
+    traces:
+      exporters: [debug, otlp_http/aspire]
+    metrics:
+      exporters: [debug, otlp_http/aspire]
+    logs:
+      exporters: [debug, otlp_http/aspire]

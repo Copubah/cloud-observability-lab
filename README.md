@@ -5,10 +5,10 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 6: FastAPI emits traces, metrics, and correlated logs to an
-OpenTelemetry Collector with a debug exporter. The `/error` route demonstrates
-exception correlation. Aspire Dashboard comes next; traffic generation,
-environment-driven incidents, and application Dockerization follow later.
+Phase 7: FastAPI sends traces, metrics, and correlated logs through the
+OpenTelemetry Collector to Aspire Dashboard. The `/error` route demonstrates
+exception correlation. Traffic generation, environment-driven incidents,
+and application Dockerization follow in later phases.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -699,3 +699,187 @@ set the three exporter variables to `console` and restart the API.
 
 References: [Collector configuration](https://opentelemetry.io/docs/collector/configuration/)
 and [memory limiter](https://github.com/open-telemetry/opentelemetry-collector/tree/main/processor/memorylimiterprocessor).
+
+## Phase 7: Aspire Dashboard
+
+Aspire provides an interactive view of the telemetry already emitted by the
+API. No .NET application, SDK, or Aspire AppHost is required for this Python
+lab. The standalone Dashboard accepts standard OTLP.
+
+```mermaid
+flowchart LR
+    API[FastAPI on host] -->|OTLP HTTP localhost:4318| Collector
+    subgraph Docker network: cloud-observability-lab
+        Collector -->|OTLP HTTP aspire-dashboard:18890| Dashboard[Aspire Dashboard]
+        Collector --> Debug[Debug exporter]
+    end
+    Browser -->|localhost:18888| Dashboard
+```
+
+`otel/collector-aspire.yaml` is an overlay loaded after the Phase 6 base
+configuration. Collector mappings merge and exporter lists are replaced,
+so it adds forwarding while preserving each signal's existing receiver and
+processors. The original base file still runs the debug-only Phase 6 lab.
+`otel/aspire.env` configures anonymous frontend and OTLP access for this
+loopback-only local setup. The Dashboard will display an unsecured-endpoint
+banner; do not publish these ports on a public interface.
+
+The image below is pinned by digest, resolving to Dashboard 13.5.2 during
+verification. The `13` tag alone can move; keep the digest for reproducibility.
+The Collector's `otlp_http/aspire` exporter uses `compression: none` because
+this Dashboard image rejected gzip-compressed OTLP HTTP bodies with protobuf
+parse errors. The Python exporters do not change.
+
+### Start the visualization stack
+
+From the repository root, stop the Phase 6 Collector if it is still running.
+Create a dedicated network (if it already exists, inspect and reuse it):
+
+```bash
+docker network create cloud-observability-lab
+
+ASPIRE_IMAGE=mcr.microsoft.com/dotnet/aspire-dashboard:13@sha256:c5cfff500bab4f81072226445f659f02e9792c61bd5ae2c4a9423b40fa9eabb1
+docker pull "$ASPIRE_IMAGE"
+
+docker run -d --rm --name aspire-dashboard \
+  --network cloud-observability-lab \
+  --env-file otel/aspire.env \
+  -p 127.0.0.1:18888:18888 \
+  "$ASPIRE_IMAGE"
+```
+
+Open <http://localhost:18888>. It should load without a login token. The
+Dashboard's OTLP ports are not published: only the Collector reaches them
+through Docker DNS. Then validate the merged Collector configuration:
+
+```bash
+docker run --rm \
+  --mount "type=bind,source=$PWD/otel/collector-config.yaml,target=/etc/otelcol-contrib/config.yaml,readonly" \
+  --mount "type=bind,source=$PWD/otel/collector-aspire.yaml,target=/etc/otelcol-contrib/aspire.yaml,readonly" \
+  otel/opentelemetry-collector-contrib:0.152.1 \
+  validate --config=/etc/otelcol-contrib/config.yaml \
+  --config=/etc/otelcol-contrib/aspire.yaml
+
+docker run -d --rm --name cloud-observability-collector \
+  --network cloud-observability-lab \
+  --memory=256m --cpus=1 \
+  --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+  -e GOMEMLIMIT=128MiB \
+  -p 127.0.0.1:4318:4318 \
+  --mount "type=bind,source=$PWD/otel/collector-config.yaml,target=/etc/otelcol-contrib/config.yaml,readonly" \
+  --mount "type=bind,source=$PWD/otel/collector-aspire.yaml,target=/etc/otelcol-contrib/aspire.yaml,readonly" \
+  otel/opentelemetry-collector-contrib:0.152.1 \
+  --config=/etc/otelcol-contrib/config.yaml \
+  --config=/etc/otelcol-contrib/aspire.yaml
+```
+
+| Purpose | Host | Inside Docker network |
+|---|---|---|
+| API | 127.0.0.1:8000 | API is still a host process |
+| Collector OTLP HTTP | 127.0.0.1:4318 | cloud-observability-collector:4318 |
+| Collector OTLP gRPC | Not published | cloud-observability-collector:4317 |
+| Dashboard UI | 127.0.0.1:18888 | aspire-dashboard:18888 |
+| Dashboard OTLP HTTP | Not published | aspire-dashboard:18890 |
+| Dashboard OTLP gRPC | Not published | aspire-dashboard:18889 |
+| Collector health / self-metrics | Not published | 13133 / 8888 |
+
+In another terminal, start the API from the repository root:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+export OTEL_TRACES_EXPORTER=otlp
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+export OTEL_METRIC_EXPORT_INTERVAL=1000
+export OTEL_BSP_SCHEDULE_DELAY=1000
+export OTEL_BLRP_SCHEDULE_DELAY=1000
+export LOG_LEVEL=INFO
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Unset stale signal-specific OTLP endpoints/protocols if you configured them
+earlier; they override generic settings. The app still exports to the
+Collector, not directly to the Dashboard. `.env` files are not automatically
+loaded by the app. Only Dashboard's `otel/aspire.env` is loaded by Docker.
+
+### Walk through the Dashboard
+
+Send these requests once from a third terminal:
+
+```bash
+curl --fail-with-body -i http://127.0.0.1:8000/orders \
+  -H 'Content-Type: application/json' \
+  -H 'traceparent: 00-11111111111111111111111111111111-2222222222222222-01' \
+  -d '{"customer_id":1,"product":"Cloud Lab Notebook","quantity":2,"price":"19.99"}'
+
+curl -i http://127.0.0.1:8000/error \
+  -H 'traceparent: 00-33333333333333333333333333333333-4444444444444444-01'
+```
+
+Expect 201 and 500. Allow a few seconds for batching, then:
+
+1. Open **Structured logs**. Select `cloud-observability-lab` if necessary.
+   Find `Order saved` and the Error-level `Request failed` record.
+2. Click the error record's trace link, displayed as `3333333`. It opens the
+   `GET /error` trace. Select the span to inspect status, exception details,
+   and attributes. The log and trace must have the same full trace/span IDs.
+3. Open **Traces** and select `POST /orders`. Its waterfall contains nine
+   spans: the server span, four business steps, and four SQLite operations.
+   The four business steps are siblings under the server span.
+4. Click **Metrics** in the sidebar. Choose `cloud-observability-lab` and
+   select `lab.http.request.duration`, `lab.http.requests`, or
+   `lab.orders.created` in the instrument tree. Expand the time window if
+   your requests are older than the selected duration. Metrics have separate
+   series for their route, status, and outcome attributes.
+
+An instrument is absent until its first measurement; for example, generate
+a 404 to create `lab.http.client_errors`. Counter charts may show changes
+over time, so use the Collector's cumulative data points when checking exact
+totals. A short burst produces only a few points; keep the API running and
+make more requests to see an evolving chart. SDK diagnostics under `otel.sdk.*`
+are distinct from the lab's `lab.*` metrics.
+
+Standalone mode shows telemetry, not an AppHost-managed resource lifecycle
+or container console-log view. Use **Structured logs** for application logs.
+Dashboard data is held in memory and bounded by its retention limits;
+restarting the Dashboard clears it. This is not durable telemetry storage.
+
+Verified screenshots from synthetic local traffic:
+
+![Order trace waterfall](docs/screenshots/aspire-order-trace.png)
+
+![Correlated structured logs](docs/screenshots/aspire-logs.png)
+
+### Troubleshooting and cleanup
+
+- An empty Dashboard can mean the API has not sent data, the Collector has
+  not flushed, or forwarding failed. Inspect both `docker logs
+  cloud-observability-collector` and `docker logs aspire-dashboard`.
+- Debug output alone proves Collector receipt, not Dashboard delivery. Check
+  the UI and look for exporter errors or dropped items in Collector logs.
+- `aspire-dashboard` must resolve on the Collector's Docker network. Using
+  `localhost:18890` inside the Collector points back to the Collector itself.
+- The exporter must target OTLP HTTP 18890, not UI 18888 or gRPC 18889.
+  Preserve `compression: none` for the pinned Dashboard image.
+- Only temporary failures are retried, for up to 30 seconds; the in-memory
+  queue is bounded to 256 requests. Non-retryable responses or exhausted
+  retries can lose data. The debug exporter is independent of Dashboard delivery.
+- If host UI port 18888 is occupied, publish `127.0.0.1:18887:18888` and
+  browse port 18887. The internal Collector-to-Dashboard endpoint stays unchanged.
+
+Stop the API first so it flushes, then:
+
+```bash
+docker stop cloud-observability-collector
+docker stop aspire-dashboard
+docker network rm cloud-observability-lab
+```
+
+The `--rm` containers are removed. Cached images and the API's SQLite file
+remain. The complete application Compose stack is still reserved for Phase 9.
+
+References: [standalone Dashboard](https://aspire.dev/dashboard/standalone/)
+and [Dashboard configuration](https://aspire.dev/dashboard/configuration/).

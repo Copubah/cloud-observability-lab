@@ -5,9 +5,9 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 10: pytest covers the API, SQLite persistence, incident modes, and
-trace/log correlation without AWS or a running Collector. The local Compose
-stack remains available for end-to-end visualization. AWS architecture is next.
+Phase 11: the AWS deployment architecture is documented, including networking,
+telemetry routing, IAM, three alarms, costs, and teardown. No AWS resources
+have been created. Terraform implementation follows in Phase 12.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -1183,3 +1183,40 @@ Reference: [FastAPI testing with pytest and HTTPX](https://fastapi.tiangolo.com/
 Verified result: **25 passed** on Python 3.12.14 (container) and 3.13.14
 (local virtual environment). Both runs report one dependency deprecation
 warning from Starlette's AnyIO `BlockingPortal` alias; it is not suppressed.
+
+## Phase 11 — AWS architecture
+
+Read the complete [AWS design](docs/aws-architecture.md). It specifies one
+Fargate task containing FastAPI and an ADOT Collector sidecar behind an ALB,
+with two public subnets and no NAT gateway. The task accepts application
+traffic only from the ALB; OTLP stays within the task.
+
+Traces go to X-Ray, metrics to CloudWatch through EMF, and existing correlated
+JSON stdout logs through ECS's `awslogs` driver. This changes configuration,
+not Python instrumentation. It avoids duplicate application-log ingestion.
+SQLite orders are disposable across task replacements; this is a single-task
+portfolio demo, not a durable or highly available order service.
+
+The document defines exactly three alarms: application 5xx rate above 5%,
+p99 target latency above two seconds, and at least one unhealthy app container
+(corresponding to an unhealthy task in this design). Each requires three of
+five one-minute periods. It gives exact metric dimensions, missing-data behavior,
+traffic requirements, and limitations. The existing mixed traffic generator
+contains deliberate failures and slow requests, so it is not a quiet alarm baseline.
+
+This is a design-only phase: the complete artifact is Markdown and Mermaid;
+there is no deployment code to run yet. Inspect it with:
+
+```bash
+cat docs/aws-architecture.md
+git diff --check
+```
+
+Concrete verification: render the design's Mermaid diagram in a Markdown
+preview and follow each telemetry path to its named AWS destination. Check the
+alarm table against the linked AWS metric definitions. Successful review leaves
+OTLP unexposed, distinguishes ECS health from ALB health, and accounts for
+costs and disposable data. AWS runtime verification remains a Phase 12 gate.
+
+No AWS CLI calls, image publication, Terraform apply, or cloud costs were
+incurred by this phase. The local stack and 25-test suite remain unchanged.

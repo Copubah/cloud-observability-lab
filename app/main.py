@@ -1,5 +1,6 @@
 """HTTP entry point for Cloud Observability Lab."""
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -47,7 +48,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="Cloud Observability Lab",
     description="A production-style API for learning logs, metrics, and traces.",
-    version="0.5.0",
+    version="0.8.0",
     lifespan=lifespan,
 )
 app.include_router(users.router)
@@ -60,6 +61,13 @@ app.add_middleware(RequestLoggingMiddleware)
 async def health() -> dict[str, str]:
     """Check process liveness without depending on a database or exporter."""
     return {"status": "healthy"}
+
+
+@app.get("/slow", tags=["diagnostics"])
+async def deliberate_latency() -> dict[str, str]:
+    """Demonstrate latency without blocking the event loop."""
+    await asyncio.sleep(2.3)
+    return {"status": "slow", "delay_seconds": "2.3"}
 
 
 @app.get("/error", tags=["diagnostics"])

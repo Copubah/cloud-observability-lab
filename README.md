@@ -5,10 +5,10 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 7: FastAPI sends traces, metrics, and correlated logs through the
-OpenTelemetry Collector to Aspire Dashboard. The `/error` route demonstrates
-exception correlation. Traffic generation, environment-driven incidents,
-and application Dockerization follow in later phases.
+Phase 8: the API exports all three telemetry signals through the Collector
+into Aspire Dashboard. A repeatable traffic generator exercises normal,
+slow, and failing requests; environment variables reproduce order incidents.
+Application Dockerization follows in Phase 9.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -883,3 +883,136 @@ remain. The complete application Compose stack is still reserved for Phase 9.
 
 References: [standalone Dashboard](https://aspire.dev/dashboard/standalone/)
 and [Dashboard configuration](https://aspire.dev/dashboard/configuration/).
+
+## Phase 8 — traffic and incident simulation
+
+The generator creates a repeatable mix so metrics reveal changes, traces
+locate the slow or failed business step, and correlated logs explain why.
+It uses Python's standard library and requires no additional dependencies.
+
+Files: `scripts/generate_traffic.py`, `app/services/order_service.py`,
+`app/main.py`, `.env.example`, and this README. The complete executable
+implementation lives in these files.
+
+`GET /slow` always waits 2.3 seconds using `asyncio.sleep`, which yields the
+event loop. Order latency uses `time.sleep` inside `save_order`, already
+running in FastAPI's worker pool. The delay occurs before opening SQLite,
+so it models a slow persistence dependency without holding a database lock.
+The actual SQLite child spans remain fast while `save_order` dominates.
+
+| Environment | Behavior for valid orders |
+|---|---|
+| Both unset or false | Normal insert, HTTP 201 |
+| `SIMULATE_DB_LATENCY=true` | Wait 2.3 seconds inside `save_order`, then insert |
+| `SIMULATE_ERRORS=true` | Raise inside `save_order` before insertion, HTTP 500 |
+| Both true | Wait, then fail without inserting |
+
+Only the case-insensitive value `true` enables a flag. Error mode fails every
+valid order, deliberately avoiding random failures. Earlier validation and
+unknown-customer responses still behave normally. `/health` and `/users`
+remain available; `/error` always fails regardless of these flags. Failed
+inserts do not increment `lab.orders.created`. Simulation attributes on the
+span and warning/error logs identify the intentional incident.
+
+### Run a baseline
+
+Start the Collector and Dashboard using Phase 7's commands. In the API
+terminal, retain the Phase 7 OTLP exports and run:
+
+```bash
+source .venv/bin/activate
+export SIMULATE_DB_LATENCY=false
+export SIMULATE_ERRORS=false
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+In another terminal:
+
+```bash
+source .venv/bin/activate
+python scripts/generate_traffic.py --requests 10 --delay 0.5 --url http://127.0.0.1:8000
+```
+
+Requests cycle through `/health`, `/users`, `/orders`, `/slow`, `/error`.
+`--requests` counts total attempts, not cycles. Requests are sequential;
+`--delay` is a pause between completed requests, not a target request rate.
+Every fifth request intentionally returns HTTP 500. Each successful order
+creates a real row in the configured SQLite database.
+
+Expected final baseline output:
+
+```text
+Summary: {"200": 6, "201": 2, "500": 2}
+```
+
+`/slow` should take approximately 2.3 seconds. Timing varies with load.
+The default timeout is 10 seconds; use `--timeout 20` if needed. The script
+rejects invalid counts and nonfinite/negative delays. HTTP errors are counted
+and do not stop the run; connection failures are counted as `transport_error`
+and produce exit code 1. Exit code 0 means all attempts received HTTP responses,
+not that all responses succeeded. Ctrl-C prints partial totals and exits 130.
+There are no retries, which avoids silently creating duplicate orders.
+
+### Diagnose latency, then failures
+
+Stop the API with Ctrl-C, enable latency, and restart in that same terminal:
+
+```bash
+export SIMULATE_DB_LATENCY=true
+export SIMULATE_ERRORS=false
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Generate another batch using the command above. In Aspire, filter the request
+duration metric to `/orders`: latency rises while orders continue succeeding.
+Open a new `POST /orders` trace: `save_order` takes roughly 2.3 seconds and
+has `lab.simulation.db_latency=true`. Its log says `Simulating database latency`.
+
+Stop the API again and switch to errors:
+
+```bash
+export SIMULATE_DB_LATENCY=false
+export SIMULATE_ERRORS=true
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Repeat the ten-request batch. Expect:
+
+```text
+Summary: {"200": 6, "500": 4}
+```
+
+In Aspire, filter `lab.http.server_errors` to `/orders` to distinguish the
+incident from the always-failing `/error`. Follow `Request failed` from
+Structured logs into its order trace. The `save_order` span records
+`Simulated order persistence failure`; there is no INSERT child span or
+`Order saved` log. `lab.orders.created` stops increasing for this batch.
+Keep the API running a few seconds after traffic for telemetry batching.
+
+For a concrete combined-mode check, restart with both flags true and run:
+
+```bash
+curl -i -w '\nHTTP %{http_code}; elapsed %{time_total}s\n' \
+  http://127.0.0.1:8000/orders \
+  -H 'Content-Type: application/json' \
+  -d '{"customer_id":1,"product":"Incident demo","quantity":2,"price":"19.99"}'
+```
+
+Expect HTTP 500 after at least about 2.3 seconds, with both simulation
+attributes on `save_order`. Verification during development exercised all
+four flag combinations against fresh SQLite files and checked response
+counts, timing, persisted rows, trace attributes, and correlated error logs.
+
+### Restore normal behavior
+
+Stop the API, then clear the flags and restart:
+
+```bash
+unset SIMULATE_DB_LATENCY SIMULATE_ERRORS
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+An existing API process does not inherit later shell exports. `.env.example`
+is documentation, not automatically loaded configuration. A wrong URL or
+occupied port produces connection/startup failures; match `--url` to the
+API's listening port. Use Phase 7's cleanup commands when finished.

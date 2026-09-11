@@ -1,6 +1,8 @@
 """Order processing with a separate span for each business step."""
 
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -54,6 +56,18 @@ def calculate_total(order: OrderCreate) -> Decimal:
 
 @tracer.start_as_current_span("save_order")
 def save_order(order: OrderCreate, total: Decimal, path: Path) -> Order:
+    span = trace.get_current_span()
+    if os.getenv("SIMULATE_DB_LATENCY", "false").lower() == "true":
+        span.set_attribute("lab.simulation.db_latency", True)
+        logger.warning("Simulating database latency")
+        # Delay inside save_order so the waterfall locates the bottleneck.
+        # This synchronous handler runs in FastAPI's worker thread pool.
+        time.sleep(2.3)
+    if os.getenv("SIMULATE_ERRORS", "false").lower() == "true":
+        span.set_attribute("lab.simulation.error", True)
+        logger.error("Simulating order persistence failure")
+        # Fail before opening a transaction: no order or success metric is written.
+        raise RuntimeError("Simulated order persistence failure")
     created_at = datetime.now(timezone.utc)
     with connect(path) as connection:
         cursor = connection.cursor().execute(

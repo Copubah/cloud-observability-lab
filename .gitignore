@@ -18,3 +18,5 @@ htmlcov/
 *.tfvars
 !*.tfvars.example
 crash.log
+# Terraform generated variable files may contain deployment details/secrets.
+*.tfvars.json

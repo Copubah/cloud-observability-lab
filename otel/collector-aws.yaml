@@ -1,0 +1,53 @@
+# ADOT receives vendor-neutral OTLP inside the Fargate task only.
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 192
+    spike_limit_mib: 48
+  batch:
+    timeout: 1s
+    send_batch_size: 256
+  filter/lab:
+    metrics:
+      include:
+        match_type: regexp
+        metric_names: ['^lab\.']
+  resource/environment:
+    attributes:
+      - key: deployment.environment.name
+        value: ${env:LAB_ENVIRONMENT}
+        action: upsert
+exporters:
+  awsxray:
+    region: ${env:AWS_REGION}
+    indexed_attributes: [http.route]
+  awsemf:
+    region: ${env:AWS_REGION}
+    namespace: CloudObservabilityLab
+    log_group_name: ${env:EMF_LOG_GROUP}
+    log_stream_name: otel-metrics
+    dimension_rollup_option: NoDimensionRollup
+    resource_to_telemetry_conversion:
+      enabled: true
+    # Preserve first cumulative samples; later exports emit deltas.
+    retain_initial_value_of_delta_metric: true
+    metric_declarations:
+      - dimensions: [[service.name, deployment.environment.name, http.route, http.request.method, http.response.status_code, outcome]]
+        metric_name_selectors: ['^lab\.http\.']
+      - dimensions: [[service.name, deployment.environment.name]]
+        metric_name_selectors: ['^lab\.orders\.created$']
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource/environment, batch]
+      exporters: [awsxray]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/lab, resource/environment, batch]
+      exporters: [awsemf]

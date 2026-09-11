@@ -1,8 +1,9 @@
 # AWS architecture — Phase 11
 
-Status: proposed deployment design, reviewed against AWS documentation in
-September 2026. No AWS resources have been created. Phase 12 will implement
-Terraform and validate the AWS Collector configuration before deployment.
+Status: deployment design, reviewed against AWS documentation in September
+2026. [Phase 12 implementation](../terraform/README.md) now exists and passes
+local validation. No AWS resources have been created; live deployment gates
+remain pending.
 
 ## Problem and design
 

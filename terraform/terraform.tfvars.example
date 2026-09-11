@@ -1,0 +1,6 @@
+aws_region          = "us-east-1"
+project_name        = "cloud-observability-lab"
+environment         = "demo"
+# Documentation address only. Replace with your own public IPv4 /32 before apply.
+allowed_client_cidr = "192.0.2.1/32"
+deploy_app          = false

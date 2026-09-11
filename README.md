@@ -5,9 +5,9 @@ locate where it happened, and logs explain why.
 
 ## Current stage
 
-Phase 11: the AWS deployment architecture is documented, including networking,
-telemetry routing, IAM, three alarms, costs, and teardown. No AWS resources
-have been created. Terraform implementation follows in Phase 12.
+Phase 12: Terraform and the pinned ADOT configuration are implemented and
+locally validated for us-east-1. The read-only ECR bootstrap plan succeeds;
+AWS deployment and live verification are pending. No cloud resources were created.
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -1220,3 +1220,37 @@ costs and disposable data. AWS runtime verification remains a Phase 12 gate.
 
 No AWS CLI calls, image publication, Terraform apply, or cloud costs were
 incurred by this phase. The local stack and 25-test suite remain unchanged.
+
+## Phase 12 — Terraform implementation
+
+The complete [Terraform runbook](terraform/README.md) covers setup, image builds,
+ECR bootstrap/publication, plan review, deployment, incident verification, and
+teardown. Terraform definitions are in `terraform/`; the AWS sidecar image
+and configuration are in `otel/Dockerfile.aws` and `otel/collector-aws.yaml`.
+
+The two-stage workflow solves the image bootstrap dependency: first create two
+ECR repositories, publish the app and Collector images, then supply immutable
+image digests for the full ECS stack. The configured region is `us-east-1`.
+The ALB requires your public IPv4 CIDR; the example's `192.0.2.1/32` is a
+reserved documentation address, not a usable deployment access rule.
+
+Run the checks from the repository root:
+
+```bash
+terraform -chdir=terraform init
+terraform -chdir=terraform fmt -check -recursive
+terraform -chdir=terraform validate
+terraform -chdir=terraform test
+```
+
+Verified: schema validation passes; four mocked plan tests pass; the pinned
+ADOT image starts with the exact AWS config. Real Python OTLP was sent through
+ADOT into a loopback AWS protocol stub: X-Ray segment conversion, EMF dimension
+sets, histogram statistic sets, and counter deltas were inspected. No AWS
+telemetry was sent by that check. A real read-only bootstrap plan using the
+configured AWS credentials reports **2 to add, 0 to change, 0 to destroy**.
+
+The local checks do not establish deployed IAM permissions, X-Ray ingestion,
+CloudWatch alarm transitions, or teardown correctness. Those remain explicit
+deployment gates. No Terraform apply or ECR push has run. Review the runbook's
+costs and provide the actual client CIDR before preparing deployment inputs.

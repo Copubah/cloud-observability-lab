@@ -22,10 +22,16 @@ it so the existing repositories can be managed and destroyed safely.
 
 ## Pending
 
-The preview uses `192.0.2.1/32`, a reserved documentation address, because the
-operator's actual public IPv4 CIDR has not been supplied. The saved
-`terraform/review-only.tfplan` is **not approved for apply**. Regenerate a plan
-with the real CIDR before reviewing and applying the full deployment.
+The workspace's public IPv4 was discovered through AWS's public-IP endpoint.
+A new `terraform/deployment.tfplan` uses that address as a `/32`, the published
+image digests, and `us-east-1`. It proposes **29 additions, 0 changes, 0 deletions**.
+The exact address is stored locally in gitignored `terraform/access.auto.tfvars.json`.
+This permits testing from the workspace; browsers behind another public IP
+will not have access. Recheck the address if the network changes.
+
+The final deployment plan is prepared but **awaiting approval for apply**.
+The earlier `terraform/review-only.tfplan` uses a documentation address and
+must not be applied. State, plans, and generated inputs remain gitignored.
 
 No VPC, ALB, ECS service, CloudWatch log groups, or alarms have been created.
 Live telemetry ingestion, IAM enforcement, alarm transitions/recovery, and

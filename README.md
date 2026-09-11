@@ -7,8 +7,8 @@ locate where it happened, and logs explain why.
 
 Phase 12: Terraform and the pinned ADOT configuration are implemented and
 locally validated for us-east-1. Both images are published to ECR; a full-stack
-preview proposes 29 additions. The real client CIDR and deployment approval
-are pending. See [deployment status](docs/aws-deployment-status.md).
+plan proposes 29 additions, restricted to the workspace public IPv4 /32.
+Deployment approval is pending. See [deployment status](docs/aws-deployment-status.md).
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next

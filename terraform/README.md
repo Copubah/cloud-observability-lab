@@ -6,8 +6,11 @@ adds the VPC, two public subnets, ALB, ECS cluster/task/service, IAM roles,
 three log groups, and exactly three alarms. No NAT gateway, RDS, EFS, or Aspire
 is deployed. Notification actions are unset until a destination is supplied.
 
-Implementation is complete; no resources have been applied. Actual AWS
-telemetry ingestion, IAM enforcement, alarm transitions, and destroy remain
+The ECR-only bootstrap has been applied and both images are published in
+us-east-1. See [deployment status and digests](../docs/aws-deployment-status.md).
+The full stack has
+not been applied. AWS telemetry ingestion, IAM enforcement, alarm transitions,
+and destroy remain
 unverified. Do not treat a mocked plan or local AWS protocol stub as a live AWS
 test. Cost-bearing deployment requires review of the saved plan and your real
 client CIDR. The default CIDR in the example is documentation-only.

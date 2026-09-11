@@ -6,8 +6,9 @@ locate where it happened, and logs explain why.
 ## Current stage
 
 Phase 12: Terraform and the pinned ADOT configuration are implemented and
-locally validated for us-east-1. The read-only ECR bootstrap plan succeeds;
-AWS deployment and live verification are pending. No cloud resources were created.
+locally validated for us-east-1. Both images are published to ECR; a full-stack
+preview proposes 29 additions. The real client CIDR and deployment approval
+are pending. See [deployment status](docs/aws-deployment-status.md).
 
 At the end of each phase, verify the changes, commit them, and push to the
 GitHub repository before waiting for explicit confirmation to start the next
@@ -1252,5 +1253,5 @@ configured AWS credentials reports **2 to add, 0 to change, 0 to destroy**.
 
 The local checks do not establish deployed IAM permissions, X-Ray ingestion,
 CloudWatch alarm transitions, or teardown correctness. Those remain explicit
-deployment gates. No Terraform apply or ECR push has run. Review the runbook's
-costs and provide the actual client CIDR before preparing deployment inputs.
+deployment gates. The ECR-only bootstrap has now been applied. Review the runbook's costs
+and provide the actual client CIDR before applying the full-stack deployment.

@@ -2,8 +2,8 @@
 
 Status: deployment design, reviewed against AWS documentation in September
 2026. [Phase 12 implementation](../terraform/README.md) now exists and passes
-local validation. No AWS resources have been created; live deployment gates
-remain pending.
+local validation. The two ECR repositories are now created; full-stack
+deployment and live telemetry gates remain pending.
 
 ## Problem and design
 

@@ -3,7 +3,11 @@ mock_provider "aws" {
     defaults = { names = ["us-east-1a", "us-east-1b"] }
   }
 }
+# Keep tests isolated from generated local deployment inputs.
 variables {
+  deploy_app          = false
+  app_digest          = ""
+  collector_digest    = ""
   allowed_client_cidr = "192.0.2.1/32"
 }
 run "bootstrap" {

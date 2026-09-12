@@ -7,7 +7,7 @@ resource "aws_ecr_repository" "images" {
   for_each             = toset(["app", "collector"])
   name                 = "${local.name}/${each.key}"
   image_tag_mutability = "IMMUTABLE"
-  force_delete         = false
+  force_delete         = true
   image_scanning_configuration { scan_on_push = true }
 }
 data "aws_availability_zones" "available" { state = "available" }
